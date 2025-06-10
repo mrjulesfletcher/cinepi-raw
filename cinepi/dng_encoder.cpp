@@ -360,7 +360,8 @@ void DngEncoder::dng_save(uint8_t const *mem, StreamInfo const &info, uint8_t co
 		const char tiemcode[] = { (uint8_t)(fn % (uint8_t)frameRate),time_info->tm_sec,time_info->tm_min, time_info->tm_hour, 0, 0, 0, 0 };
 		TIFFSetField(tif, TIFFTAG_TIMECODE, &tiemcode);
 
-		bool uncompressed = (info.pixel_format != formats::SBGGR12 || info.pixel_format != formats::SBGGR10 );
+                bool uncompressed = (info.pixel_format != formats::SBGGR12 &&
+                                     info.pixel_format != formats::SBGGR10);
 
 		if(uncompressed && options_->compression == COMPRESSION_NONE){
 			// NEON UNPACK
