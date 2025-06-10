@@ -120,7 +120,7 @@ Matrix(float m0, float m1, float m2,
 };
 
 DngEncoder::DngEncoder(RawOptions const *options)
-	: Encoder(options), abortEncode_(false), abortOutput_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false)
+        : Encoder(options), abortEncode_(false), abortOutput_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false), pool_initialized_(false)
 {
     options_ = options;
 	// output_thread_ = std::thread(&DngEncoder::outputThread, this);
@@ -138,9 +138,15 @@ DngEncoder::~DngEncoder()
 		encode_thread_[i].join();
 		cache_thread_[i].join();
 	}
-	abortOutput_ = true;
-	// output_thread_.join();
-	LOG(2, "DngEncoder closed");
+        abortOutput_ = true;
+        // output_thread_.join();
+        LOG(2, "DngEncoder closed");
+
+        for (auto &b : buffer_pool_)
+        {
+                free(b.mem);
+                free(b.lomem);
+        }
 }
 
 void DngEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const &info, int64_t timestamp_us)
@@ -156,12 +162,27 @@ void DngEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const &
 
 void DngEncoder::EncodeBuffer2(int fd, size_t size, void *mem, StreamInfo const &info, size_t losize, void *lomem, StreamInfo const &loinfo, int64_t timestamp_us, CompletedRequest::ControlList const &metadata)
 {
-	{
-		std::lock_guard<std::mutex> lock(encode_mutex_);
-		EncodeItem item = { mem, size, info, lomem, losize, loinfo, metadata, timestamp_us, index_++ };
-		encode_queue_.push(item);
-		encode_cond_var_.notify_all();
-	}
+        {
+                std::lock_guard<std::mutex> lock(encode_mutex_);
+
+                if (!pool_initialized_)
+                {
+                        pool_mem_size_ = size;
+                        pool_lomem_size_ = losize;
+                        buffer_pool_.resize(BUFFER_POOL_SIZE);
+                        for (int i = 0; i < BUFFER_POOL_SIZE; i++)
+                        {
+                                buffer_pool_[i].mem = (uint8_t *)malloc(pool_mem_size_);
+                                buffer_pool_[i].lomem = (uint8_t *)malloc(pool_lomem_size_);
+                                free_pool_.push(i);
+                        }
+                        pool_initialized_ = true;
+                }
+
+                EncodeItem item = { mem, size, info, lomem, losize, loinfo, metadata, timestamp_us, index_++ };
+                encode_queue_.push(item);
+                encode_cond_var_.notify_all();
+        }
 }
 
 void DngEncoder::dng_save(uint8_t const *mem, StreamInfo const &info, uint8_t const *lomem, StreamInfo const &loinfo, size_t losize,
@@ -479,19 +500,36 @@ void DngEncoder::encodeThread(int num)
 			}
 		}
 
-		frames_ = {encode_item.index};
-		LOG(1, "memcpy frame: " << encode_item.index);
+                frames_ = {encode_item.index};
+                LOG(1, "copy frame: " << encode_item.index);
 
-		{	
-			uint8_t *mem = (uint8_t*)malloc(encode_item.size);
-			memcpy(mem, encode_item.mem, encode_item.size);
-			uint8_t *lomem = (uint8_t*)malloc(encode_item.losize);
-			memcpy(lomem, encode_item.lomem, encode_item.losize);
-			CachedItem item = { mem, encode_item.size, encode_item.info, lomem, encode_item.losize, encode_item.loinfo, encode_item.met, encode_item.timestamp_us, encode_item.index };
-			std::lock_guard<std::mutex> lock(cache_mutex_);
-			cache_buffer_.push_back(std::move(item));
-			cache_cond_var_.notify_all();
-		}
+                int pool_id;
+                {
+                        std::unique_lock<std::mutex> lock(pool_mutex_);
+                        while (free_pool_.empty())
+                                pool_cond_var_.wait(lock);
+                        pool_id = free_pool_.front();
+                        free_pool_.pop();
+                }
+
+                PoolBuffer &buf = buffer_pool_[pool_id];
+                memcpy(buf.mem, encode_item.mem, encode_item.size);
+                memcpy(buf.lomem, encode_item.lomem, encode_item.losize);
+
+                CachedItem item = { buf.mem, encode_item.size, encode_item.info,
+                                    buf.lomem, encode_item.losize, encode_item.loinfo,
+                                    encode_item.met, encode_item.timestamp_us, encode_item.index,
+                                    pool_id };
+                {
+                        std::lock_guard<std::mutex> lock(cache_mutex_);
+                        cache_buffer_.push_back(std::move(item));
+                        cache_cond_var_.notify_all();
+                }
+
+                {
+                        input_done_callback_(nullptr);
+                        output_ready_callback_(encode_item.mem, encode_item.size, encode_item.timestamp_us, true);
+                }
 
 		{
 			input_done_callback_(nullptr);
@@ -551,7 +589,10 @@ void DngEncoder::cacheThread(int num)
 		still_capture = false;
 		
 		cache_time += (end_time);
-		free(cache_item.mem);
-		free(cache_item.lomem);
-	}
+                {
+                        std::lock_guard<std::mutex> lock(pool_mutex_);
+                        free_pool_.push(cache_item.pool_id);
+                        pool_cond_var_.notify_one();
+                }
+        }
 }

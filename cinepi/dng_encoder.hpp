@@ -5,6 +5,7 @@
 #include <queue>
 #include <deque>
 #include <thread>
+#include <vector>
 #include <boost/circular_buffer.hpp>
 
 #include "encoder/encoder.hpp"
@@ -79,21 +80,37 @@ private:
 	std::condition_variable encode_cond_var_;
 	std::thread encode_thread_[NUM_ENC_THREADS];
 
-	struct CachedItem
-	{
-		void *mem;
-        size_t size;
-		StreamInfo info;
-		void *lomem;
-		size_t losize;
-		StreamInfo loinfo;
-		CompletedRequest::ControlList met;
-		int64_t timestamp_us;
-		uint64_t index;
-	};
+        struct CachedItem
+        {
+                void *mem;
+                size_t size;
+                StreamInfo info;
+                void *lomem;
+                size_t losize;
+                StreamInfo loinfo;
+                CompletedRequest::ControlList met;
+                int64_t timestamp_us;
+                uint64_t index;
+                int pool_id;  // index of the pool buffer used
+        };
 	boost::circular_buffer<CachedItem> cache_buffer_;
 	std::queue<CachedItem> cache_queue_;
 	std::mutex cache_mutex_;
 	std::condition_variable cache_cond_var_;
-	std::thread cache_thread_[NUM_ENC_THREADS];
+        std::thread cache_thread_[NUM_ENC_THREADS];
+
+        struct PoolBuffer
+        {
+                uint8_t *mem;
+                uint8_t *lomem;
+        };
+
+        static const int BUFFER_POOL_SIZE = 8;
+        std::vector<PoolBuffer> buffer_pool_;
+        std::queue<int> free_pool_;
+        std::mutex pool_mutex_;
+        std::condition_variable pool_cond_var_;
+        bool pool_initialized_;
+        size_t pool_mem_size_;
+        size_t pool_lomem_size_;
 };
