@@ -357,8 +357,8 @@ void DngEncoder::dng_save(uint8_t const *mem, StreamInfo const &info, uint8_t co
 		TIFFMergeFieldInfo(tif, xtiffFieldInfo, 2);
 		const double frameRate = (double)*options_->framerate;
 		TIFFSetField(tif, TIFFTAG_FRAMERATE, &frameRate);
-		const char tiemcode[] = { (uint8_t)(fn % (uint8_t)frameRate),time_info->tm_sec,time_info->tm_min, time_info->tm_hour, 0, 0, 0, 0 };
-		TIFFSetField(tif, TIFFTAG_TIMECODE, &tiemcode);
+               const char timecode[] = { (uint8_t)(fn % (uint8_t)frameRate),time_info->tm_sec,time_info->tm_min, time_info->tm_hour, 0, 0, 0, 0 };
+               TIFFSetField(tif, TIFFTAG_TIMECODE, &timecode);
 
 		bool uncompressed = (info.pixel_format != formats::SBGGR12 || info.pixel_format != formats::SBGGR10 );
 
