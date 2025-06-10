@@ -14,7 +14,7 @@
 6. [Command-Line-Options](#command-line-options)
 7. [Using-the-Redis-Interface](#using-the-redis-interface)
 8. [Example-Workflow](#example-workflow)
-9. [Tutorial](#tutorial)
+9. [Tutorials](#tutorials)
 10. [License](#license)
 
 ## Features
@@ -23,10 +23,22 @@
 - Redis based API for controlling recording parameters remotely.
 - Includes standard `libcamera-hello`, `libcamera-still`, `libcamera-jpeg`, `libcamera-vid`, `libcamera-raw` and `libcamera-detect` applications.
 - Optional post-processing stages (object detection, HDR, segmentation, etc.) configured via JSON files in `assets/`.
+- Lossless LJ92 compression option to keep file sizes manageable.
+- Multithreaded DNG encoder for sustained high frame rates.
+- Histogram and other frame statistics are published over Redis in real time.
 
 ## Architecture Overview
 
 CinePi RAW keeps the original libcamera application framework and layers a small controller on top. The `cinepi-raw` executable interacts with the camera through `LibcameraApp` classes in `core/`. Frames are passed to `DngEncoder` which writes CinemaDNG files while `CinePIController` publishes and receives settings from Redis. This design allows you to tweak camera parameters in real time without restarting the app.
+At runtime the main loop in `cinepi_raw.cpp` performs the following steps:
+
+1. `CinePIController` synchronises options from Redis and spawns a thread that listens for control messages.
+2. `CinePIRecorder` configures the camera via libcamera based on these options and starts the preview.
+3. For each captured frame the `DngEncoder` converts the Bayer data to CinemaDNG. Compression and metadata insertion happen on worker threads.
+4. The encoded frame is pushed to an `Output` implementation that writes to disk.
+5. Statistics such as focus distance and histograms are fed back to Redis for external monitoring.
+
+Post-processing stages located under `post_processing_stages/` can hook into this pipeline and manipulate images before they are written. Stages are enabled through JSON configuration files.
 ## Requirements
 Install the following dependencies before building:
 
@@ -35,6 +47,9 @@ Install the following dependencies before building:
 - [Redis++](https://github.com/sewenew/redis-plus-plus)
 - libtiff development files
 - libcamera and its headers (see Raspberry Pi documentation)
+- Boost program_options library
+- Optional: OpenCV if you plan to use the CV post-processing stages
+- Optional: TensorFlow Lite for neural network based stages
 
 ## Building from Source
 
@@ -55,12 +70,28 @@ make -j4
 # sudo make install  # optional
 ```
 
-The resulting binaries appear in `build/`. To cross compile on a Linux host use a toolchain file and set the installation prefix:
+The resulting binaries appear in `build/`. When compiling on a desktop host you
+can cross compile for the Raspberry\u00a0Pi using a toolchain file:
 
 ```bash
-cmake .. -DCMAKE_TOOLCHAIN_FILE=/path/to/toolchain.cmake -DCMAKE_INSTALL_PREFIX=/opt/cinepi
+cmake .. \
+    -DCMAKE_TOOLCHAIN_FILE=/path/to/rpi.toolchain.cmake \
+    -DCMAKE_INSTALL_PREFIX=/opt/cinepi \
+    -DENABLE_OPENCV=1 -DENABLE_TFLITE=1
 make
 ```
+
+The toolchain file sets the cross compiler and Pi sysroot. Installing to a
+prefix keeps the output isolated for packaging.
+
+Extra CMake flags control optional components:
+
+```bash
+# Enable OpenCV and TFLite based stages
+cmake .. -DENABLE_OPENCV=1 -DENABLE_TFLITE=1
+```
+
+When cross compiling you may need to provide paths to the Raspberry Pi sysroot and the cross compiler.
 
 
 ## Directory Layout
@@ -68,15 +99,15 @@ make
 The repository closely mirrors the upstream `libcamera-apps` layout with additional source files for the CinePi RAW functionality.
 
 - **apps/** – Standard demo applications from `rpicam-apps` (`libcamera-hello`, `libcamera-jpeg`, `libcamera-still`, `libcamera-vid`, `libcamera-raw`, `libcamera-detect`). These serve as examples and test programs.
-- **cinepi/** – Implementation of `cinepi-raw` together with the `CinePIController` that talks to Redis. Also contains the DNG encoder and small helper utilities.
+- **cinepi/** – Implementation of `cinepi-raw` together with the `CinePIController` that talks to Redis. Includes `cinepi_raw.cpp`, the `CinePIRecorder` class and the DNG encoder.
 - **core/** – Common `libcamera` helper code (`LibcameraApp`, option parsers and the post-processing pipeline) shared by all apps.
 - **encoder/** – H.264/MJPEG encoders plus the custom DNG encoder used by CinePi RAW.
 - **image/** – Routines for handling BMP, JPEG, PNG and DNG images.
 - **output/** – Base classes that write encoded output to files or pipes. Applications plug their encoder into these objects.
 - **preview/** – Abstraction layer for displaying the camera preview with DRM/KMS, EGL, Qt or a null implementation for headless operation.
 - **post_processing_stages/** – Example post-processing stages (HDR merge, object detection, segmentation, etc.). They are dynamically loaded based on JSON configuration.
-- **assets/** – Sample JSON files demonstrating how to configure post-processing stages.
-- **utils/** – Python helper scripts (`camera-bug-report`, `checkstyle.py`, `timestamp.py`, `test.py`, `version.py`).
+- **assets/** – Sample JSON files demonstrating how to configure post-processing stages. Each file corresponds to a stage name.
+- **utils/** – Python helper scripts (`camera-bug-report`, `checkstyle.py`, `timestamp.py`, `test.py`, `version.py`) used for debugging and CI.
 
 ### Key Components
 
@@ -86,6 +117,15 @@ The repository closely mirrors the upstream `libcamera-apps` layout with additio
 - **core/libcamera_app.* **– base class wrapping libcamera APIs and providing the preview and capture pipeline.
 - **encoder/** – contains concrete encoder implementations, including H.264 and MJPEG, reused by the demos.
 - **utils/test.py** – runs basic automated tests to verify the binaries operate correctly.
+
+### Post-processing pipeline
+
+Image manipulations such as HDR merging, annotation or machine learning inference
+are implemented as modular *post-processing stages*. Each stage inherits from
+`PostProcessingStage` and can be enabled by passing a JSON file with the
+`--post-process-file` option. The JSON describes the parameters for the stage and
+matches the filenames in `assets/`. Multiple stages can be chained together in
+the order specified in the configuration file.
 
 ## Applications and Scripts
 
@@ -213,22 +253,82 @@ redis-cli set is_recording 0
 redis-cli publish cp_controls is_recording
 ```
 
+### Example: recording with all options
+
+Below shows a longer command that exercises most arguments. Adjust the
+values as needed for your camera:
+
+```bash
+./build/cinepi-raw \
+    --redis redis://localhost:6379/0 \
+    --width 4096 --height 2160 \
+    --codec yuv420 --fps 24 --timeout 60000 \
+    --mediaDest /media/RAW --clip_number 1 --folder test_take \
+    --wb 1.2,1.1 --sensor imx477 --model "CinePi" --make "Raspberry Pi" \
+    --serial 0001 --clipping 0.98 --denoise off --hdr 0 \
+    --post-process-file assets/hdr_merge.json
+```
+
+The command above records one minute of 4K uncompressed DNG frames,
+writes them under `/media/RAW/test_take`, embeds metadata and disables
+on-camera denoise. Post-processing stages can be chained by specifying
+additional JSON files.
+
 Captured DNG frames are stored under `/media/RAW/<generated_folder>`.
 
-## Tutorial
+## Tutorials
 
-1. **Build and install dependencies** using the instructions above. Compile the project with `cmake` and `make`.
-2. **Launch `redis-server`** so that the controller can communicate.
-3. **Run `cinepi-raw`**. The program prints log messages describing the current configuration.
-4. **Use `redis-cli` or any Redis client** to change camera parameters at runtime. Modify exposure, gain or toggle recording without restarting the app.
-5. **Inspect the output**. Recorded frames appear as DNG files in clip folders. Metadata and histogram information is published on Redis channels for monitoring or custom UI integration.
-6. **Experiment with post-processing** by providing one of the JSON files in `assets/` using the `--post-process-file` option. These configure stages such as HDR merging or TensorFlow Lite inference.
-7. **Automate control** by writing small Redis clients (see Python snippet above) or integrating the keys into your own UI.
+### 1. Build and record a clip
 
-8. **Capture single frames** by publishing `stll` on the control channel to trigger a still capture.
-9. **Set metadata strings** using `--make`, `--model` and `--serial` to embed camera information in each DNG file.
-10. **Monitor camera state** by subscribing to `cp_stats` and `cp_histogram` for framerate and histogram data.
-For more advanced documentation about libcamera and its options see the official Raspberry Pi camera docs.
+```bash
+sudo apt install build-essential cmake libtiff-dev libhiredis-dev libredis++-dev
+git clone https://github.com/cinepi/cinepi-raw.git
+cd cinepi-raw && mkdir build && cd build
+cmake .. && make -j4
+```
+
+Start the Redis server and capture a short clip:
+
+```bash
+redis-server &
+./cinepi-raw --timeout 10000 --output first.dng
+```
+
+### 2. Remote control via Redis
+
+```bash
+./cinepi-raw --redis redis://127.0.0.1:6379/0 &
+redis-cli set iso 800
+redis-cli publish cp_controls iso
+```
+
+Use `redis-cli` to set other keys (`is_recording`, `awb`, `fps`, ... ) while the
+program runs. Publish the key name on `cp_controls` to apply changes.
+
+### 3. Using post-processing stages
+
+Select a configuration from `assets/` to enable a processing pipeline:
+
+```bash
+./cinepi-raw --post-process-file assets/hdr_merge.json --timeout 10000
+```
+
+Multiple JSON files can be specified, separated by commas, to chain stages.
+
+For more information about libcamera options see the official Raspberry Pi
+camera documentation.
+
+## Testing
+
+The repository includes a small Python test suite that exercises the command line
+applications. After building, run:
+
+```bash
+python3 utils/test.py --exe-dir build --output-dir /tmp
+```
+
+The script will execute each application and verify that basic functionality
+works. It requires numpy and, for some tests, `exiftool` to be installed.
 
 ## License
 
