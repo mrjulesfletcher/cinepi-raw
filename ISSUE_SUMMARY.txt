@@ -1,0 +1,42 @@
+This file summarizes issues and potential solutions discussed during the analysis of the codebase.
+
+1. **Heavy Memory Copying in DngEncoder**
+   - Per-frame `malloc` and `memcpy` calls in `encodeThread` copy raw frames into new buffers.
+   - **Solution:** Implement zero-copy handling by passing dmabuf pointers from libcamera directly. Maintain a pool of reusable buffers to avoid repeated allocations.
+
+2. **Incorrect `uncompressed` Flag Logic**
+   - In `dng_encoder.cpp`, the check `info.pixel_format != formats::SBGGR12 || info.pixel_format != formats::SBGGR10` is always true.
+   - **Solution:** Use logical AND so the flag is true only when the format is neither SBGGR12 nor SBGGR10.
+
+3. **Typo in Timecode Variable**
+   - Variable `tiemcode` is used for TIFFTAG_TIMECODE.
+   - **Solution:** Rename to `timecode` for clarity.
+
+4. **Unused Output Thread**
+   - `DngEncoder` declares an `outputThread` and thread member but they are commented out.
+   - **Solution:** Either implement the thread to handle asynchronous output or remove the unused code.
+
+5. **Redis `bgsave` on Every Message**
+   - `cinepi_controller.cpp` calls `redis_->bgsave()` for each control message, which can stall processing.
+   - **Solution:** Trigger `bgsave` less frequently or via a dedicated command.
+
+6. **Manual Memory Management**
+   - Temporary buffers such as thumbnail and cache buffers use `malloc`/`free`.
+   - **Solution:** Replace with RAII containers (e.g., `std::vector` or `std::unique_ptr`) to avoid leaks and simplify cleanup.
+
+7. **Potential libtiff Inefficiencies**
+   - The project uses libtiff with workarounds to generate DNG files.
+   - **Solution:** Audit libtiff API calls, consolidate tag writes, and use larger writes (e.g., `TIFFWriteEncodedStrip`). Consider asynchronous I/O for file writing.
+
+8. **LJ92 Predictor and Huffman Tables**
+   - `lj92` encoder may use default predictor and tables.
+   - **Solution:** Benchmark predictors 1‑8 on Bayer data and select the best. Precompute Huffman tables tuned for 12‑bit data.
+
+9. **LJ92 SIMD Optimization**
+   - Encoding loops are scalar, missing NEON vectorization.
+   - **Solution:** Implement NEON intrinsics to process multiple pixels per iteration, with a fallback path for non-NEON builds.
+
+10. **Asynchronous DNG Writer**
+    - Current pipeline writes DNG files in the encoding thread, blocking capture when disk I/O is slow.
+    - **Solution:** Create a dedicated worker thread and queue to perform libtiff writes asynchronously.
+
