@@ -39,6 +39,9 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #include "lj92.h"
 
@@ -80,6 +83,8 @@ typedef struct _ljp {
     // Parse state
     int cnt;
     u32 b;
+    uint64_t bitbuf; // larger bit buffer for faster reads
+    int bits_in_buf;
     u16* image;
     u16* rowcache;
     u16* outrow[2];
@@ -357,59 +362,46 @@ inline static int nextdiff(ljp* self) {
     int diff = receive(self,t);
     diff = extend(self,diff,t);
 #else
-    u32 b = self->b;
-    int cnt = self->cnt;
+    uint64_t b = self->bitbuf;
+    int cnt = self->bits_in_buf;
     int huffbits = self->huffbits;
     int ix = self->ix;
-    int next;
-    while (cnt < huffbits) {
-        next = *(u16*)&self->data[ix];
-        int one = next&0xFF;
-        int two = next>>8;
-        b = (b<<16)|(one<<8)|two;
-        cnt += 16;
-        ix += 2;
-        if (one==0xFF) {
-            //printf("%x %x %x %x %d\n",one,two,b,b>>8,cnt);
-            b >>= 8;
-            cnt -= 8;
-        } else if (two==0xFF) ix++;
+    while (cnt < huffbits && ix < self->datalen) {
+        uint8_t byte = self->data[ix++];
+        if (byte == 0xFF && ix < self->datalen && self->data[ix] == 0x00)
+            ix++;
+        b = (b << 8) | byte;
+        cnt += 8;
     }
-    int index = b >> (cnt - huffbits);
+    int index = (b >> (cnt - huffbits)) & ((1 << huffbits) - 1);
     u16 ssssused = self->hufflut[index];
-    int usedbits = ssssused&0xFF;
-    int t = ssssused>>8;
+    int usedbits = ssssused & 0xFF;
+    int t = ssssused >> 8;
     self->sssshist[t]++;
     cnt -= usedbits;
-    int keepbitsmask = (1 << cnt)-1;
-    b &= keepbitsmask;
+    b &= ((uint64_t)1 << cnt) - 1;
     int diff;
     if (t == 16) {
         diff = 1 << 15;
     } else {
-        while (cnt < t) {
-            next = *(u16*)&self->data[ix];
-            int one = next&0xFF;
-            int two = next>>8;
-            b = (b<<16)|(one<<8)|two;
-            cnt += 16;
-            ix += 2;
-            if (one==0xFF) {
-                b >>= 8;
-                cnt -= 8;
-            } else if (two==0xFF) ix++;
+        while (cnt < t && ix < self->datalen) {
+            uint8_t byte = self->data[ix++];
+            if (byte == 0xFF && ix < self->datalen && self->data[ix] == 0x00)
+                ix++;
+            b = (b << 8) | byte;
+            cnt += 8;
         }
         cnt -= t;
-        diff = b >> cnt;
-        int vt = 1<<(t-1);
+        diff = (b >> cnt) & ((1 << t) - 1);
+        int vt = 1 << (t-1);
         if (diff < vt) {
             vt = (-1 << t) + 1;
             diff += vt;
         }
+        b &= ((uint64_t)1 << cnt) - 1;
     }
-    keepbitsmask = (1 << cnt)-1;
-    self->b = b & keepbitsmask;
-    self->cnt = cnt;
+    self->bitbuf = b;
+    self->bits_in_buf = cnt;
     self->ix = ix;
     //printf("%d %d\n",t,diff);
 #ifdef DEBUG
@@ -425,6 +417,8 @@ static int parsePred6(ljp* self) {
     self->ix += BEH(self->data[self->ix]);
     self->cnt = 0;
     self->b = 0;
+    self->bitbuf = 0;
+    self->bits_in_buf = 0;
     int write = self->writelen;
     // Now need to decode huffman coded values
     int c = 0;
@@ -537,6 +531,8 @@ static int parseScan(ljp* self) {
     self->ix += BEH(self->data[self->ix]);
     self->cnt = 0;
     self->b = 0;
+    self->bitbuf = 0;
+    self->bits_in_buf = 0;
     u16* out = self->image;
     u16* thisrow = self->outrow[0];
     u16* lastrow = self->outrow[1];
@@ -1046,6 +1042,102 @@ void writePost(lje* self) {
     self->encodedWritten = w;
 }
 
+#ifdef __ARM_NEON
+static int writeBodyNeon(lje* self)
+{
+    uint16_t* pixel = self->image;
+    int pixcount = self->width * self->height;
+    int scan = self->readLength;
+    uint16_t* rowcache = (uint16_t*)calloc(1, self->width * 4);
+    uint16_t* rows[2];
+    rows[0] = rowcache;
+    rows[1] = &rowcache[self->width];
+
+    int col = 0;
+    int row = 0;
+    int w = self->encodedWritten;
+    uint8_t* out = self->encoded;
+    uint8_t next = 0;
+    uint8_t nextbits = 8;
+    while (pixcount > 0) {
+        int chunk = self->width - col;
+        if (chunk > 8)
+            chunk = 8;
+        uint16x8_t cur = vld1q_u16(pixel);
+        uint16x8_t leftv = vextq_u16(vdupq_n_u16(rows[1][col ? col-1 : 0]), cur, 7);
+        uint16x8_t top = vld1q_u16(&rows[0][col]);
+        uint16x8_t top_left = vextq_u16(vdupq_n_u16(rows[0][col ? col-1 : 0]), top, 7);
+        uint16x8_t pred = vaddq_u16(top, vshrq_n_u16(vsubq_u16(leftv, top_left), 1));
+        int16x8_t diffv = vreinterpretq_s16_u16(vsubq_u16(cur, pred));
+        uint16_t diffs[8];
+        vst1q_u16(diffs, vreinterpretq_u16_s16(diffv));
+        for (int i = 0; i < chunk; i++) {
+            rows[1][col] = vgetq_lane_u16(cur, i);
+            int32_t diff = (int16_t)diffs[i];
+            int ssss = 32 - __builtin_clz((uint32_t)abs(diff));
+            if (diff == 0)
+                ssss = 0;
+            int huffcode = self->huffsym[ssss];
+            int huffenc = self->huffenc[huffcode];
+            int huffbits = self->huffbits[huffcode];
+            int vt = ssss>0?(1<<(ssss-1)):0;
+            if (diff < vt)
+                diff += (1 << ssss) - 1;
+            while (huffbits>0) {
+                int usebits = huffbits>nextbits?nextbits:huffbits;
+                int tophuff = huffenc >> (huffbits - usebits);
+                next |= (tophuff << (nextbits-usebits));
+                nextbits -= usebits;
+                huffbits -= usebits;
+                huffenc &= (1<<huffbits)-1;
+                if (nextbits==0) {
+                    out[w++] = next;
+                    if (next==0xff) out[w++] = 0x0;
+                    next = 0;
+                    nextbits = 8;
+                }
+            }
+            if (ssss == 16)
+                ssss = 0;
+            while (ssss>0) {
+                int usebits = ssss>nextbits?nextbits:ssss;
+                int tophuff = diff >> (ssss - usebits);
+                next |= (tophuff << (nextbits-usebits));
+                nextbits -= usebits;
+                ssss -= usebits;
+                diff &= (1<<ssss)-1;
+                if (nextbits==0) {
+                    out[w++] = next;
+                    if (next==0xff) out[w++] = 0x0;
+                    next = 0;
+                    nextbits = 8;
+                }
+            }
+            pixel++; scan--; col++; pixcount--;
+            if (scan==0) { pixel += self->skipLength; scan = self->readLength; }
+            if (col==self->width) {
+                uint16_t* tmprow = rows[1];
+                rows[1] = rows[0];
+                rows[0] = tmprow;
+                col = 0; row++;
+            }
+        }
+    }
+    if (nextbits<8) {
+        out[w++] = next;
+        if (next==0xff) out[w++] = 0x0;
+    }
+    free(rowcache);
+    self->encodedWritten = w;
+    return LJ92_ERROR_NONE;
+}
+#endif
+
+#ifdef __ARM_NEON
+int writeBody(lje* self) {
+    return writeBodyNeon(self);
+}
+#else
 int writeBody(lje* self) {
     // Scan through the tile using the standard type 6 prediction
     // Need to cache the previous 2 row in target coordinates because of tiling
