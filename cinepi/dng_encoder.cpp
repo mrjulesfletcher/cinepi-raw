@@ -120,15 +120,14 @@ Matrix(float m0, float m1, float m2,
 };
 
 DngEncoder::DngEncoder(RawOptions const *options)
-	: Encoder(options), abortEncode_(false), abortOutput_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false)
+        : Encoder(options), abortEncode_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false)
 {
     options_ = options;
-	// output_thread_ = std::thread(&DngEncoder::outputThread, this);
-	for (int i = 0; i < NUM_ENC_THREADS; i++){
-		encode_thread_[i] = std::thread(std::bind(&DngEncoder::encodeThread, this, i));
-		cache_thread_[i] = std::thread(std::bind(&DngEncoder::cacheThread, this, i));
-	}
-	LOG(2, "Opened DngEncoder");
+        for (int i = 0; i < NUM_ENC_THREADS; i++){
+                encode_thread_[i] = std::thread(std::bind(&DngEncoder::encodeThread, this, i));
+                cache_thread_[i] = std::thread(std::bind(&DngEncoder::cacheThread, this, i));
+        }
+        LOG(2, "Opened DngEncoder");
 }
 
 DngEncoder::~DngEncoder()
@@ -138,9 +137,7 @@ DngEncoder::~DngEncoder()
 		encode_thread_[i].join();
 		cache_thread_[i].join();
 	}
-	abortOutput_ = true;
-	// output_thread_.join();
-	LOG(2, "DngEncoder closed");
+        LOG(2, "DngEncoder closed");
 }
 
 void DngEncoder::EncodeBuffer(int fd, size_t size, void *mem, StreamInfo const &info, int64_t timestamp_us)

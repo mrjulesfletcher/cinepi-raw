@@ -43,14 +43,8 @@ private:
 	void encodeThread(int num);
 
 	void cacheThread(int num);
-	// Handle the output buffers in another thread so as not to block the encoders. The
-	// application can take its time, after which we return this buffer to the encoder for
-	// re-use.
-	void outputThread();
-
-	bool encodeCheck_;
-	bool abortEncode_;
-	bool abortOutput_;
+        bool encodeCheck_;
+        bool abortEncode_;
 	bool resetCount_;
 	uint64_t index_;
 	uint64_t frames_;
