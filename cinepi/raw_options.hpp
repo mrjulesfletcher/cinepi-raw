@@ -15,11 +15,13 @@
 
 struct RawOptions : public VideoOptions
 {   
-    RawOptions() : VideoOptions()
-	{
-		using namespace boost::program_options;
-		options_.add_options();
-	}
+        RawOptions() : VideoOptions()
+        {
+                using namespace boost::program_options;
+                options_.add_options()
+                        ("redis-snapshot-ms", value<uint32_t>(&snapshot_interval)->default_value(5000),
+                         "Interval in milliseconds between Redis snapshots (0 to disable)");
+        }
 
 	std::optional<std::string> redis;
 
@@ -33,6 +35,8 @@ struct RawOptions : public VideoOptions
 	std::string make;
 	std::string serial;
 
-	float clipping;
+        float clipping;
+
+        uint32_t snapshot_interval;
 
 };
