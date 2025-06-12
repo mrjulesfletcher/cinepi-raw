@@ -300,20 +300,23 @@ void DngEncoder::dng_save(uint8_t const *mem, StreamInfo const &info, uint8_t co
 
 		// LOG(1, losize << " , " << loinfo.width << " , " << loinfo.height << " , " << loinfo.stride);
 
-		size_t rowSize = loinfo.stride*3;
-		size_t thumbSize = rowSize*loinfo.height;
-		uint8_t *thumb = (uint8_t*)malloc(thumbSize);
-		uint8_t *read = &thumb[0];
-		if(nv21_to_rgb(thumb, lomem, loinfo.stride, loinfo.height) != 1){
-			throw std::runtime_error("error converting yuv2rgb image data");
-		}
-		for(int y = 0; y < loinfo.height; y++){
-			if (TIFFWriteScanline(tif, (read + y*rowSize), y, 0) != 1)
-				throw std::runtime_error("error writing DNG image data");
-			
-		}
-		free(thumb);
-		TIFFWriteDirectory(tif);
+                size_t rowSize = loinfo.stride * 3;
+                size_t thumbSize = rowSize * loinfo.height;
+
+                if (thumb_buffer_.size() < thumbSize)
+                        thumb_buffer_.resize(thumbSize);
+
+                uint8_t *thumb = thumb_buffer_.data();
+                uint8_t *read = thumb;
+
+                if (nv21_to_rgb(thumb, lomem, loinfo.stride, loinfo.height) != 1)
+                        throw std::runtime_error("error converting yuv2rgb image data");
+                for(int y = 0; y < loinfo.height; y++){
+                        if (TIFFWriteScanline(tif, (read + y*rowSize), y, 0) != 1)
+                                throw std::runtime_error("error writing DNG image data");
+
+                }
+                TIFFWriteDirectory(tif);
 
 		// LOG(1, "w: " << info.width << ", " << info.height);
 

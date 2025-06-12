@@ -107,4 +107,7 @@ private:
         std::vector<size_t> lo_pool_size_;
         std::queue<int> free_pool_indices_;
         std::mutex pool_mutex_;
+
+        // Buffer for the thumbnail image, resized as required
+        std::vector<uint8_t> thumb_buffer_;
 };
