@@ -243,7 +243,6 @@ void CinePIController::mainThread(){
                 app_->SetControls(cl);
             }
 
-            redis_->bgsave();
         }
     });
 
@@ -258,5 +257,27 @@ void CinePIController::mainThread(){
 
         t += milliseconds(THREAD_SLEEP_MS);
         this_thread::sleep_until(t);
+    }
+}
+
+void CinePIController::snapshotThread(){
+    using namespace std::chrono;
+    while(!abortThread_){
+        uint32_t interval = options_->snapshot_interval;
+        try{
+            auto r = redis_->get(CONTROL_KEY_BGSAVE_INTERVAL);
+            if(r) interval = std::stoul(*r);
+        }catch(const std::exception &e){ }
+
+        if(interval == 0){
+            std::this_thread::sleep_for(seconds(1));
+            continue;
+        }
+
+        std::this_thread::sleep_for(milliseconds(interval));
+        if(abortThread_) break;
+        try{
+            redis_->bgsave();
+        }catch(const std::exception &e){ }
     }
 }

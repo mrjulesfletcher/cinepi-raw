@@ -46,12 +46,15 @@ class CinePIController : public CinePIState
         ~CinePIController() {
             abortThread_ = true;
             main_thread_.join();
+            if(snapshot_thread_.joinable())
+                snapshot_thread_.join();
         };
 
         void start(){
             redis_ = new Redis(options_->redis.value_or(REDIS_DEFAULT));
             LOG(2, redis_->ping());
             main_thread_ = std::thread(std::bind(&CinePIController::mainThread, this));
+            snapshot_thread_ = std::thread(std::bind(&CinePIController::snapshotThread, this));
         }
 
         void sync();
@@ -95,6 +98,7 @@ class CinePIController : public CinePIState
     private:
         void mainThread();
         void pubThread();
+        void snapshotThread();
 
         int trigger_;
         int triggerStill_;
@@ -108,4 +112,5 @@ class CinePIController : public CinePIState
 
         bool abortThread_;
         std::thread main_thread_;
+        std::thread snapshot_thread_;
 };

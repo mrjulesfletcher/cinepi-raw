@@ -36,6 +36,7 @@
 #define CONTROL_KEY_COMPRESSION "compress"
 
 #define CONTROL_KEY_CAMERAINIT "cam_init"
+#define CONTROL_KEY_BGSAVE_INTERVAL "bgsave_i"
 
 class CinePIState
 {
