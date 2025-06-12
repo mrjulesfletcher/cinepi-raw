@@ -120,14 +120,21 @@ Matrix(float m0, float m1, float m2,
 };
 
 DngEncoder::DngEncoder(RawOptions const *options)
-	: Encoder(options), abortEncode_(false), abortOutput_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false)
+        : Encoder(options), abortEncode_(false), abortOutput_(false), index_(0), frameStop_(0), frames_(0), resetCount_(false), encodeCheck_(false), cache_buffer_(448), compressed(false)
 {
     options_ = options;
-	// output_thread_ = std::thread(&DngEncoder::outputThread, this);
-	for (int i = 0; i < NUM_ENC_THREADS; i++){
-		encode_thread_[i] = std::thread(std::bind(&DngEncoder::encodeThread, this, i));
-		cache_thread_[i] = std::thread(std::bind(&DngEncoder::cacheThread, this, i));
-	}
+        size_t pool_size = cache_buffer_.capacity();
+        mem_pool_.resize(pool_size);
+        lo_pool_.resize(pool_size);
+        mem_pool_size_.resize(pool_size, 0);
+        lo_pool_size_.resize(pool_size, 0);
+        for(size_t i = 0; i < pool_size; ++i)
+                free_pool_indices_.push(i);
+        // output_thread_ = std::thread(&DngEncoder::outputThread, this);
+        for (int i = 0; i < NUM_ENC_THREADS; i++){
+                encode_thread_[i] = std::thread(std::bind(&DngEncoder::encodeThread, this, i));
+                cache_thread_[i] = std::thread(std::bind(&DngEncoder::cacheThread, this, i));
+        }
 	LOG(2, "Opened DngEncoder");
 }
 
@@ -482,16 +489,36 @@ void DngEncoder::encodeThread(int num)
 		frames_ = {encode_item.index};
 		LOG(1, "memcpy frame: " << encode_item.index);
 
-		{	
-			uint8_t *mem = (uint8_t*)malloc(encode_item.size);
-			memcpy(mem, encode_item.mem, encode_item.size);
-			uint8_t *lomem = (uint8_t*)malloc(encode_item.losize);
-			memcpy(lomem, encode_item.lomem, encode_item.losize);
-			CachedItem item = { mem, encode_item.size, encode_item.info, lomem, encode_item.losize, encode_item.loinfo, encode_item.met, encode_item.timestamp_us, encode_item.index };
-			std::lock_guard<std::mutex> lock(cache_mutex_);
-			cache_buffer_.push_back(std::move(item));
-			cache_cond_var_.notify_all();
-		}
+                int pool_index;
+                uint8_t *mem;
+                uint8_t *lomem;
+                {
+                        std::lock_guard<std::mutex> p_lock(pool_mutex_);
+                        pool_index = free_pool_indices_.front();
+                        free_pool_indices_.pop();
+                        if (!mem_pool_[pool_index] || mem_pool_size_[pool_index] < encode_item.size)
+                        {
+                                mem_pool_[pool_index] = std::unique_ptr<uint8_t[]>(new uint8_t[encode_item.size]);
+                                mem_pool_size_[pool_index] = encode_item.size;
+                        }
+                        if (!lo_pool_[pool_index] || lo_pool_size_[pool_index] < encode_item.losize)
+                        {
+                                lo_pool_[pool_index] = std::unique_ptr<uint8_t[]>(new uint8_t[encode_item.losize]);
+                                lo_pool_size_[pool_index] = encode_item.losize;
+                        }
+                        mem = mem_pool_[pool_index].get();
+                        lomem = lo_pool_[pool_index].get();
+                }
+
+                memcpy(mem, encode_item.mem, encode_item.size);
+                memcpy(lomem, encode_item.lomem, encode_item.losize);
+
+                CachedItem item = { mem, encode_item.size, encode_item.info, lomem, encode_item.losize, encode_item.loinfo, encode_item.met, encode_item.timestamp_us, encode_item.index, pool_index };
+                {
+                        std::lock_guard<std::mutex> lock(cache_mutex_);
+                        cache_buffer_.push_back(std::move(item));
+                        cache_cond_var_.notify_all();
+                }
 
 		{
 			input_done_callback_(nullptr);
@@ -550,8 +577,10 @@ void DngEncoder::cacheThread(int num)
 
 		still_capture = false;
 		
-		cache_time += (end_time);
-		free(cache_item.mem);
-		free(cache_item.lomem);
-	}
+                cache_time += (end_time);
+                {
+                        std::lock_guard<std::mutex> p_lock(pool_mutex_);
+                        free_pool_indices_.push(cache_item.pool_index);
+                }
+        }
 }
