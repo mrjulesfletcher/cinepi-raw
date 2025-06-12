@@ -5,6 +5,8 @@
 #include <queue>
 #include <deque>
 #include <thread>
+#include <memory>
+#include <vector>
 #include <boost/circular_buffer.hpp>
 
 #include "encoder/encoder.hpp"
@@ -79,21 +81,30 @@ private:
 	std::condition_variable encode_cond_var_;
 	std::thread encode_thread_[NUM_ENC_THREADS];
 
-	struct CachedItem
-	{
-		void *mem;
+        struct CachedItem
+        {
+                void *mem;
         size_t size;
-		StreamInfo info;
-		void *lomem;
-		size_t losize;
-		StreamInfo loinfo;
-		CompletedRequest::ControlList met;
-		int64_t timestamp_us;
-		uint64_t index;
-	};
+                StreamInfo info;
+                void *lomem;
+                size_t losize;
+                StreamInfo loinfo;
+                CompletedRequest::ControlList met;
+                int64_t timestamp_us;
+                uint64_t index;
+                int pool_index;
+        };
 	boost::circular_buffer<CachedItem> cache_buffer_;
 	std::queue<CachedItem> cache_queue_;
 	std::mutex cache_mutex_;
 	std::condition_variable cache_cond_var_;
-	std::thread cache_thread_[NUM_ENC_THREADS];
+        std::thread cache_thread_[NUM_ENC_THREADS];
+
+        // Pool of buffers used to avoid per-frame allocations
+        std::vector<std::unique_ptr<uint8_t[]>> mem_pool_;
+        std::vector<std::unique_ptr<uint8_t[]>> lo_pool_;
+        std::vector<size_t> mem_pool_size_;
+        std::vector<size_t> lo_pool_size_;
+        std::queue<int> free_pool_indices_;
+        std::mutex pool_mutex_;
 };
